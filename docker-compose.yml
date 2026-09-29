@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database with PostGIS
+  postgres:
+    image: postgis/postgis:15-3.3
+    container_name: ki_disposition_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-kidb}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ki_pass_dev}
+      POSTGRES_DB: ${DB_NAME:-ki_disposition}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - ki_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kidb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # OSRM Router (for distance/time calculations)
+  osrm:
+    image: osrm/osrm-backend:latest
+    container_name: ki_disposition_osrm
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data/osm-data.pbf:/data/osm-data.pbf
+    command: osrm-routed --algorithm=mld /data/osm-data.pbf
+    networks:
+      - ki_network
+    depends_on:
+      - postgres
+
+  # Node.js Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ki_disposition_backend
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      DB_USER: ${DB_USER:-kidb}
+      DB_PASSWORD: ${DB_PASSWORD:-ki_pass_dev}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-ki_disposition}
+      OSRM_URL: http://osrm:5000
+      FRONTEND_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      osrm:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - ki_network
+    command: npm run dev
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ki_disposition_frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:3000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - ki_network
+
+  # Redis Cache (optional, for Phase 2)
+  redis:
+    image: redis:7-alpine
+    container_name: ki_disposition_cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ki_network
+    profiles:
+      - optional
+
+  # TimescaleDB (optional, for GPS telemetry - Phase 2)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: ki_disposition_timescaledb
+    environment:
+      POSTGRES_USER: ${DB_USER:-kidb}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ki_pass_dev}
+      POSTGRES_DB: ki_telemetry
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    networks:
+      - ki_network
+    profiles:
+      - optional
+
+volumes:
+  postgres_data:
+  redis_data:
+  timescaledb_data:
+
+networks:
+  ki_network:
+    driver: bridge
